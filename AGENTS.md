@@ -18,3 +18,5 @@
 ## Project definition
 
 When changing domain boundaries, adapter contracts, lifecycle or state transitions, security controls, deployment profiles, or milestone scope, read the complete [project definition](https://linear.app/poulsenapp/document/delegatd-project-definition-1aa59f714fcf) first. It is the architectural source of truth for those decisions.
+
+- When working on a Linear issue, keep it current in Linear by assigning it, moving it through the active status, and adding concise progress or blocker comments as work advances.
