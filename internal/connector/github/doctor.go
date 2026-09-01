@@ -15,9 +15,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -73,34 +70,9 @@ func newDoctorCheck(name string, cfg Config, dir string, options doctorOptions) 
 }
 
 func probe(ctx context.Context, cfg Config, dir string, options doctorOptions) (string, *doctor.Failure) {
-	if cfg.AppID <= 0 {
-		return "", doctor.NewFailure("app_id must be positive", nil)
-	}
-	if cfg.PrivateKeyFile == "" {
-		return "", doctor.NewFailure("private_key_file is required", nil)
-	}
-
-	keyPath := cfg.PrivateKeyFile
-	if !filepath.IsAbs(keyPath) {
-		keyPath = filepath.Join(dir, keyPath)
-	}
-	info, err := os.Stat(keyPath)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > maxPrivateKeySize {
-		if err == nil {
-			err = errors.New("private key file is not a usable regular file")
-		}
-		return "", doctor.NewFailure("private key file is unreadable", err)
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return "", doctor.NewFailure("private key file permissions are too broad", nil)
-	}
-	keyBytes, err := os.ReadFile(keyPath)
-	if err != nil || len(keyBytes) > maxPrivateKeySize {
-		return "", doctor.NewFailure("private key file is unreadable", err)
-	}
-	key, err := parseRSAKey(keyBytes)
-	if err != nil {
-		return "", doctor.NewFailure("private key is invalid", err)
+	key, reason, err := loadPrivateKey(cfg, dir)
+	if reason != "" {
+		return "", doctor.NewFailure(reason, err)
 	}
 
 	jwt, err := appJWT(key, cfg.AppID, options.now())

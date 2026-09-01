@@ -21,3 +21,15 @@ agent_runtimes:
   omp-primary:
     kind: omp
     config: {}
+
+resources:
+  api-service:
+    kind: repository
+    connector: github-main
+    config:
+      external_ref: acme/api-service
+
+policy:
+  actions:
+    change_request.open: deny
+  protected_paths: []

@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -12,8 +15,15 @@ import (
 
 	"github.com/poulsena/delegatd/internal/bootstrap"
 	"github.com/poulsena/delegatd/internal/config"
+	"github.com/poulsena/delegatd/internal/control"
 	"github.com/poulsena/delegatd/internal/doctor"
+	"github.com/poulsena/delegatd/internal/domain"
+	"github.com/poulsena/delegatd/internal/store/sqlite"
 )
+
+func runDoctorForTest(ctx context.Context, args []string, stdout, stderr io.Writer, loader func(string) (config.Document, []doctor.Check, *doctor.Failure)) int {
+	return run(ctx, args, io.NopCloser(strings.NewReader("")), stdout, stderr, commandDependencies{loadDoctor: loader})
+}
 
 func TestRunDoctorSuccessUsesStableOutputAndExitCode(t *testing.T) {
 	checks := []doctor.Check{
@@ -32,7 +42,7 @@ func TestRunDoctorSuccessUsesStableOutputAndExitCode(t *testing.T) {
 	}
 
 	var stdout, stderr strings.Builder
-	exit := run(context.Background(), []string{"doctor", "--config", "/tmp/devbox.yaml"}, &stdout, &stderr,
+	exit := runDoctorForTest(context.Background(), []string{"doctor", "--config", "/tmp/devbox.yaml"}, &stdout, &stderr,
 		func(path string) (config.Document, []doctor.Check, *doctor.Failure) {
 			if path != "/tmp/devbox.yaml" {
 				t.Fatalf("loader path = %q", path)
@@ -86,7 +96,7 @@ agent_runtimes:
 	}
 
 	var stdout, stderr strings.Builder
-	exit := run(context.Background(), []string{
+	exit := runDoctorForTest(context.Background(), []string{
 		"doctor", "--config", configPath, "--timeout", "100ms",
 	}, &stdout, &stderr, bootstrap.LoadDoctor)
 	if exit != 1 {
@@ -114,7 +124,7 @@ agent_runtimes:
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if exit := run(context.Background(), []string{"doctor", "--config", invalidPath}, &stdout, &stderr, bootstrap.LoadDoctor); exit != 1 {
+	if exit := runDoctorForTest(context.Background(), []string{"doctor", "--config", invalidPath}, &stdout, &stderr, bootstrap.LoadDoctor); exit != 1 {
 		t.Fatalf("invalid config exit = %d, want 1", exit)
 	}
 	if got, want := stdout.String(), "FAIL config: configuration YAML is invalid\nFAIL doctor: configuration invalid\n"; got != want {
@@ -147,7 +157,7 @@ func TestRunDoctorReportsAllFailuresWithoutLeakingCauses(t *testing.T) {
 	}
 
 	var stdout, stderr strings.Builder
-	exit := run(context.Background(), []string{"doctor", "--config", "devbox.yaml"}, &stdout, &stderr,
+	exit := runDoctorForTest(context.Background(), []string{"doctor", "--config", "devbox.yaml"}, &stdout, &stderr,
 		func(string) (config.Document, []doctor.Check, *doctor.Failure) {
 			return config.Document{Config: config.Config{Version: 1}}, checks, nil
 		})
@@ -181,7 +191,7 @@ func TestRunDoctorWaitsForCancellationAndReportsFailure(t *testing.T) {
 	}
 	var stdout, stderr strings.Builder
 	started := time.Now()
-	exit := run(context.Background(), []string{"doctor", "--config", "devbox.yaml", "--timeout", "10ms"}, &stdout, &stderr,
+	exit := runDoctorForTest(context.Background(), []string{"doctor", "--config", "devbox.yaml", "--timeout", "10ms"}, &stdout, &stderr,
 		func(string) (config.Document, []doctor.Check, *doctor.Failure) {
 			return config.Document{}, checks, nil
 		})
@@ -202,7 +212,7 @@ func TestRunDoctorWaitsForCancellationAndReportsFailure(t *testing.T) {
 func TestRunReportsConfigurationFailureWithoutProbing(t *testing.T) {
 	var probes atomic.Int32
 	var stdout, stderr strings.Builder
-	exit := run(context.Background(), []string{"doctor", "--config", "secret-config.yaml"}, &stdout, &stderr,
+	exit := runDoctorForTest(context.Background(), []string{"doctor", "--config", "secret-config.yaml"}, &stdout, &stderr,
 		func(string) (config.Document, []doctor.Check, *doctor.Failure) {
 			return config.Document{}, []doctor.Check{{
 				ID: "should-not-run",
@@ -234,10 +244,10 @@ func TestRunRejectsInvalidTimeout(t *testing.T) {
 	for _, timeout := range []string{"0", "-1s", "not-a-duration"} {
 		t.Run(timeout, func(t *testing.T) {
 			var stdout, stderr strings.Builder
-			if got := run(context.Background(), []string{"doctor", "--config", "x", "--timeout", timeout}, &stdout, &stderr, loader); got != 2 {
+			if got := runDoctorForTest(context.Background(), []string{"doctor", "--config", "x", "--timeout", timeout}, &stdout, &stderr, loader); got != 2 {
 				t.Fatalf("exit = %d, want 2", got)
 			}
-			if stdout.Len() != 0 || !strings.Contains(stderr.String(), usage) {
+			if stdout.Len() != 0 || !strings.Contains(stderr.String(), doctorUsage) {
 				t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}
 		})
@@ -261,7 +271,7 @@ func TestRunDoctorCLIUsageAndHelp(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr strings.Builder
-			if got := run(context.Background(), tc.args, &stdout, &stderr, loader); got != tc.exit {
+			if got := runDoctorForTest(context.Background(), tc.args, &stdout, &stderr, loader); got != tc.exit {
 				t.Fatalf("exit = %d, want %d", got, tc.exit)
 			}
 			if !strings.Contains(stderr.String(), "usage: delegatd doctor --config FILE [--timeout DURATION]") {
@@ -274,7 +284,7 @@ func TestRunDoctorCLIUsageAndHelp(t *testing.T) {
 	}
 
 	var stdout, stderr strings.Builder
-	if got := run(context.Background(), []string{"doctor", "--help"}, &stdout, &stderr, loader); got != 0 {
+	if got := runDoctorForTest(context.Background(), []string{"doctor", "--help"}, &stdout, &stderr, loader); got != 0 {
 		t.Fatalf("help exit = %d, want 0", got)
 	}
 	if !strings.Contains(stdout.String(), "usage: delegatd doctor --config FILE [--timeout DURATION]") {
@@ -283,4 +293,133 @@ func TestRunDoctorCLIUsageAndHelp(t *testing.T) {
 	if stderr.Len() != 0 {
 		t.Fatalf("help stderr = %q, want empty", stderr.String())
 	}
+}
+
+func TestTaskCLIProcessRestartKeepsSnapshots(t *testing.T) {
+	if helper := os.Getenv("POU16_HELPER"); helper != "" {
+		runTaskCLIHelper(t, helper)
+		return
+	}
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.db")
+	configPath := filepath.Join(dir, "delegatd.yaml")
+	if err := os.WriteFile(configPath, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	runHelper := func(mode, sourceVersion string) string {
+		command := exec.Command(os.Args[0], "-test.run=TestTaskCLIProcessRestartKeepsSnapshots")
+		command.Env = append(os.Environ(),
+			"POU16_HELPER="+mode,
+			"POU16_STATE="+statePath,
+			"POU16_CONFIG="+configPath,
+			"POU16_SOURCE_VERSION="+sourceVersion,
+		)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s helper failed: %v\n%s", mode, err, output)
+		}
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		if len(lines) == 0 || lines[0] == "" {
+			t.Fatalf("%s helper output is empty: %q", mode, output)
+		}
+		return lines[0]
+	}
+
+	submitted := runHelper("submit", "v1")
+	var envelope struct {
+		TaskID domain.TaskID `json:"task_id"`
+	}
+	if err := json.Unmarshal([]byte(submitted), &envelope); err != nil {
+		t.Fatalf("submit output = %q: %v", submitted, err)
+	}
+	if envelope.TaskID == "" {
+		t.Fatalf("submit output = %q, task_id is empty", submitted)
+	}
+
+	shown := runHelper("show", "v2")
+	if !strings.Contains(shown, string(envelope.TaskID)) {
+		t.Fatalf("show output = %q, missing task ID %q", shown, envelope.TaskID)
+	}
+	for _, sentinel := range []string{"repo-config-v1", "policy-v1/**", "repo-config-v2", "policy-v2/**"} {
+		if strings.Contains(shown, sentinel) != strings.Contains(sentinel, "v1") {
+			t.Fatalf("show output = %q, sentinel %q has unexpected presence", shown, sentinel)
+		}
+	}
+	if !strings.Contains(shown, `"status":"pending"`) {
+		t.Fatalf("show output = %q, missing pending status", shown)
+	}
+}
+
+func runTaskCLIHelper(t *testing.T, mode string) {
+	t.Helper()
+	statePath := os.Getenv("POU16_STATE")
+	configPath := os.Getenv("POU16_CONFIG")
+	sourceVersion := os.Getenv("POU16_SOURCE_VERSION")
+	fixedNow := time.Date(2026, time.September, 1, 12, 30, 0, 0, time.UTC)
+
+	dependencies := commandDependencies{}
+	switch mode {
+	case "submit":
+		dependencies.submitTask = func(ctx context.Context, _ string, resourceName string, input domain.TaskInput) (domain.Task, error) {
+			store, err := sqlite.Open(ctx, sqlite.Config{Path: statePath}, "")
+			if err != nil {
+				return domain.Task{}, err
+			}
+			defer store.Close()
+			service := control.NewTaskService(store, func(prefix string) string {
+				return prefix + strings.Repeat("A", 26)
+			}, func() time.Time { return fixedNow })
+			source := processRepositorySource{version: sourceVersion}
+			return service.SubmitManualRepository(ctx, resourceName, "github-main", input,
+				domain.PolicyRequest{ProtectedPaths: []string{"policy-" + sourceVersion + "/**"}}, source)
+		}
+		dependencies.showTask = func(context.Context, string, domain.TaskID) (domain.Task, error) {
+			return domain.Task{}, errors.New("show dependency was called during submit")
+		}
+		dependencies.loadDoctor = func(string) (config.Document, []doctor.Check, *doctor.Failure) {
+			return config.Document{}, nil, doctor.NewFailure("doctor dependency was called", nil)
+		}
+		if exit := run(context.Background(), []string{"task", "submit", "--config", configPath, "--resource", "api-service", "--input", "update README"}, io.NopCloser(strings.NewReader("")), os.Stdout, os.Stderr, dependencies); exit != 0 {
+			t.Fatalf("submit exit = %d", exit)
+		}
+	case "show":
+		dependencies.showTask = func(ctx context.Context, _ string, id domain.TaskID) (domain.Task, error) {
+			store, err := sqlite.OpenReadOnly(ctx, sqlite.Config{Path: statePath}, "")
+			if err != nil {
+				return domain.Task{}, err
+			}
+			defer store.Close()
+			service := control.NewTaskService(store, nil, nil)
+			return service.Show(ctx, id)
+		}
+		dependencies.submitTask = func(context.Context, string, string, domain.TaskInput) (domain.Task, error) {
+			return domain.Task{}, errors.New("submit dependency was called during show")
+		}
+		dependencies.loadDoctor = func(string) (config.Document, []doctor.Check, *doctor.Failure) {
+			return config.Document{}, nil, doctor.NewFailure("doctor dependency was called", nil)
+		}
+		if exit := run(context.Background(), []string{"task", "show", "--config", configPath, "task_" + strings.Repeat("A", 26)}, io.NopCloser(strings.NewReader("")), os.Stdout, os.Stderr, dependencies); exit != 0 {
+			t.Fatalf("show exit = %d", exit)
+		}
+	default:
+		t.Fatalf("unknown helper mode %q", mode)
+	}
+}
+
+type processRepositorySource struct {
+	version string
+}
+
+func (s processRepositorySource) Snapshot(context.Context) (domain.RepositoryMaterial, error) {
+	return domain.RepositoryMaterial{
+		ExternalRef:      "acme/api-service",
+		ExternalIdentity: "12345",
+		Revision:         "revision-" + s.version,
+		Configuration: domain.RepositoryConfiguration{
+			Version: 1,
+			Agent:   domain.AgentConfiguration{Instructions: []string{"repo-config-" + s.version}},
+		},
+	}, nil
 }
