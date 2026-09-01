@@ -373,7 +373,7 @@ func writableDSN(path string) string {
 }
 
 func readOnlyDSN(path string) string {
-	return "file:" + url.PathEscape(filepath.ToSlash(path)) + "?mode=ro&immutable=1&_pragma=query_only(1)&_foreign_keys=1"
+	return "file:" + url.PathEscape(filepath.ToSlash(path)) + "?mode=ro&_pragma=query_only(1)&_foreign_keys=1"
 }
 
 func requireDeleteJournal(ctx context.Context, database *sql.DB) error {

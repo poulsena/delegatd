@@ -111,6 +111,11 @@ func (s *Store) CreateTask(ctx context.Context, draft domain.TaskDraft) (domain.
 	if _, exists := s.tasks[draft.ID]; exists {
 		return domain.Task{}, storeError("task could not be submitted", errors.New("duplicate task"))
 	}
+	for _, existing := range s.resources {
+		if existing.name != draft.Resource.Name && existing.connector == draft.Resource.Connector && existing.externalIdentity == draft.Resource.ExternalIdentity {
+			return domain.Task{}, storeError("resource conflicts with stored onboarding", ErrResourceConflict)
+		}
+	}
 	storedResource, exists := s.resources[draft.Resource.Name]
 	if exists {
 		if storedResource.connector != draft.Resource.Connector || storedResource.externalIdentity != draft.Resource.ExternalIdentity {

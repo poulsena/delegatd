@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/poulsena/delegatd/internal/domain"
+	"github.com/poulsena/delegatd/internal/storetest"
 )
 
 func TestStoreCreatesAndReopensPendingTaskWithHistory(t *testing.T) {
@@ -132,6 +133,42 @@ func TestOpenReadOnlyLeavesDatabaseUnchanged(t *testing.T) {
 	}
 }
 
+func TestOpenReadOnlySeesWriterCommitAfterOpen(t *testing.T) {
+	dir := t.TempDir()
+	writer, err := Open(context.Background(), Config{Path: "state.db"}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := testDraft(t, "task_"+strings.Repeat("A", 26), "resource_"+strings.Repeat("B", 26), "revision-v1")
+	if _, err := writer.CreateTask(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := OpenReadOnly(context.Background(), Config{Path: "state.db"}, dir)
+	if err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := reader.Close(); err != nil {
+			t.Errorf("reader Close() error = %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Errorf("writer Close() error = %v", err)
+		}
+	})
+	second := testDraft(t, "task_"+strings.Repeat("C", 26), "resource_"+strings.Repeat("D", 26), "revision-v2")
+	if _, err := writer.CreateTask(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	got, err := reader.Task(context.Background(), second.ID)
+	if err != nil {
+		t.Fatalf("reader Task() error = %v", err)
+	}
+	if got.ID != second.ID || got.Resource.Revision != "revision-v2" {
+		t.Fatalf("reader task = %#v", got)
+	}
+}
+
 func testDraft(t *testing.T, taskID, resourceID, revision string) domain.TaskDraft {
 	t.Helper()
 	configuration, err := domain.NewSnapshot(domain.RepositoryConfiguration{
@@ -181,4 +218,20 @@ func testDraft(t *testing.T, taskID, resourceID, revision string) domain.TaskDra
 			Reason:     domain.HistoryReasonManualSubmission,
 		},
 	}
+}
+
+func TestTaskStoreContract(t *testing.T) {
+	storetest.RunTaskStoreContract(t, func(t *testing.T) storetest.TaskStore {
+		dir := t.TempDir()
+		store, err := Open(context.Background(), Config{Path: "state.db"}, dir)
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		t.Cleanup(func() {
+			if err := store.Close(); err != nil {
+				t.Errorf("Close() error = %v", err)
+			}
+		})
+		return store
+	})
 }

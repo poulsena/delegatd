@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/poulsena/delegatd/internal/domain"
+	"github.com/poulsena/delegatd/internal/storetest"
 )
 
 func TestStoreRoundTripsAndCopiesTaskSnapshots(t *testing.T) {
@@ -78,4 +79,10 @@ func testDraft(t *testing.T, taskID, resourceID, revision string) domain.TaskDra
 
 func fixedTime() time.Time {
 	return time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
+}
+
+func TestTaskStoreContract(t *testing.T) {
+	storetest.RunTaskStoreContract(t, func(*testing.T) storetest.TaskStore {
+		return New()
+	})
 }
