@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/poulsena/delegatd/internal/connector/github"
@@ -111,4 +112,74 @@ type repositorySourceFunc func(context.Context) (domain.RepositoryMaterial, erro
 
 func (f repositorySourceFunc) Snapshot(ctx context.Context) (domain.RepositoryMaterial, error) {
 	return f(ctx)
+}
+
+func TestExportedTaskWrappersReturnSafeConfigurationFailures(t *testing.T) {
+	input := domain.TaskInput{Version: 1, Source: domain.TaskSourceManual, Instructions: "instructions"}
+	if _, err := SubmitTask(context.Background(), filepath.Join(t.TempDir(), "missing.yaml"), "api-service", input); err == nil || control.SafeReason(err) != "configuration file is unreadable" {
+		t.Fatalf("SubmitTask() error = %v", err)
+	}
+	if _, err := ShowTask(context.Background(), filepath.Join(t.TempDir(), "missing.yaml"), domain.TaskID("task_"+strings.Repeat("A", 26))); err == nil || control.SafeReason(err) != "configuration file is unreadable" {
+		t.Fatalf("ShowTask() error = %v", err)
+	}
+}
+
+func TestExportedSubmitTaskRejectsInvalidConfiguration(t *testing.T) {
+	input := domain.TaskInput{Version: 1, Source: domain.TaskSourceManual, Instructions: "instructions"}
+	cases := []struct {
+		name     string
+		resource string
+		mutate   func(string) string
+		want     string
+	}{
+		{name: "unknown resource", resource: "missing", want: "resource is not configured"},
+		{name: "unsupported resource kind", resource: "api-service", mutate: func(data string) string { return strings.Replace(data, "kind: repository", "kind: unsupported", 1) }, want: "resource is unsupported"},
+		{name: "unsupported connector kind", resource: "api-service", mutate: func(data string) string { return strings.Replace(data, "kind: github", "kind: other", 1) }, want: "resource is unsupported"},
+		{name: "invalid connector configuration", resource: "api-service", mutate: func(data string) string { return strings.Replace(data, "app_id: 1", "app_id: invalid", 1) }, want: "connector configuration is invalid"},
+		{name: "invalid resource configuration", resource: "api-service", mutate: func(data string) string {
+			return strings.Replace(data, "external_ref: acme/api", "external_ref: [invalid]", 1)
+		}, want: "resource configuration is invalid"},
+		{name: "invalid store configuration", resource: "api-service", mutate: func(data string) string { return strings.Replace(data, "path: state.db", "path: [invalid]", 1) }, want: "state store is unavailable"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "delegatd.yaml")
+			writeTaskConfig(t, configPath, "state.db")
+			if testCase.mutate != nil {
+				data, err := os.ReadFile(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := osWriteFile(configPath, []byte(testCase.mutate(string(data)))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := SubmitTask(context.Background(), configPath, testCase.resource, input); err == nil || control.SafeReason(err) != testCase.want {
+				t.Fatalf("SubmitTask() error = %v, want %q", err, testCase.want)
+			}
+		})
+	}
+}
+
+func TestExportedShowTaskRejectsUnsupportedStore(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "show.yaml")
+	if err := osWriteFile(configPath, []byte("version: 1\nstore:\n  kind: memory\n  config: {}\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ShowTask(context.Background(), configPath, domain.TaskID("task_"+strings.Repeat("A", 26))); err == nil || control.SafeReason(err) != "state store is unavailable" {
+		t.Fatalf("ShowTask() error = %v", err)
+	}
+}
+
+func TestExportedShowTaskReportsUnavailableStateStore(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "show.yaml")
+	if err := osWriteFile(configPath, []byte("version: 1\nstore:\n  kind: sqlite\n  config:\n    path: missing.db\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ShowTask(context.Background(), configPath, domain.TaskID("task_"+strings.Repeat("A", 26))); err == nil || control.SafeReason(err) != "state store is unavailable" {
+		t.Fatalf("ShowTask() error = %v", err)
+	}
 }

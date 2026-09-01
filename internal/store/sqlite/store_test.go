@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -234,4 +235,208 @@ func TestTaskStoreContract(t *testing.T) {
 		})
 		return store
 	})
+}
+
+func TestOpenRejectsUnrelatedVersionZeroSchemaWithoutMutation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec("CREATE TABLE unrelated (value TEXT)"); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	beforeVersion, beforeTables := sqliteSchemaState(t, path)
+	if beforeVersion != 0 || !reflect.DeepEqual(beforeTables, []string{"unrelated"}) {
+		t.Fatalf("invalid version-zero fixture: version=%d tables=%v", beforeVersion, beforeTables)
+	}
+	if _, err := Open(context.Background(), Config{Path: filepath.Base(path)}, dir); err == nil {
+		t.Fatal("Open() accepted an unrelated version-zero schema")
+	}
+	afterVersion, afterTables := sqliteSchemaState(t, path)
+	if afterVersion != beforeVersion || !reflect.DeepEqual(afterTables, beforeTables) {
+		t.Fatalf("schema changed: before version=%d tables=%v, after version=%d tables=%v", beforeVersion, beforeTables, afterVersion, afterTables)
+	}
+}
+
+func TestOpenRejectsFutureSchemaVersionWithoutMutation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec("PRAGMA user_version = 99"); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	beforeVersion, beforeTables := sqliteSchemaState(t, path)
+	if beforeVersion != 99 || len(beforeTables) != 0 {
+		t.Fatalf("invalid future-version fixture: version=%d tables=%v", beforeVersion, beforeTables)
+	}
+	if _, err := Open(context.Background(), Config{Path: filepath.Base(path)}, dir); err == nil {
+		t.Fatal("Open() accepted a future schema version")
+	}
+	afterVersion, afterTables := sqliteSchemaState(t, path)
+	if afterVersion != beforeVersion || !reflect.DeepEqual(afterTables, beforeTables) {
+		t.Fatalf("schema changed: before version=%d tables=%v, after version=%d tables=%v", beforeVersion, beforeTables, afterVersion, afterTables)
+	}
+}
+
+func TestOpenRejectsIncompleteCurrentSchemaWithoutMutation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec("CREATE TABLE tasks (id TEXT)"); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if _, err := database.Exec("PRAGMA user_version = 1"); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	beforeVersion, beforeTables := sqliteSchemaState(t, path)
+	if beforeVersion != 1 || !reflect.DeepEqual(beforeTables, []string{"tasks"}) {
+		t.Fatalf("invalid fixture: version=%d tables=%v", beforeVersion, beforeTables)
+	}
+	if _, err := Open(context.Background(), Config{Path: filepath.Base(path)}, dir); err == nil {
+		t.Fatal("Open() accepted an incomplete current schema")
+	}
+	afterVersion, afterTables := sqliteSchemaState(t, path)
+	if afterVersion != beforeVersion || !reflect.DeepEqual(afterTables, beforeTables) {
+		t.Fatalf("schema changed: before version=%d tables=%v, after version=%d tables=%v", beforeVersion, beforeTables, afterVersion, afterTables)
+	}
+}
+
+func sqliteSchemaState(t *testing.T, path string) (int, []string) {
+	t.Helper()
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var version int
+	if err := database.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := database.Query("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		tables = append(tables, name)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return version, tables
+}
+
+func TestOpenReadOnlyEnforcesExistingPrivateDatabase(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := OpenReadOnly(context.Background(), Config{Path: "missing.db"}, dir); err == nil {
+		t.Fatal("OpenReadOnly() accepted a missing database")
+	}
+	directory := filepath.Join(dir, "directory")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenReadOnly(context.Background(), Config{Path: filepath.Base(directory)}, dir); err == nil {
+		t.Fatal("OpenReadOnly() accepted a directory")
+	}
+	path := filepath.Join(dir, "state.db")
+	writer, err := Open(context.Background(), Config{Path: filepath.Base(path)}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := OpenReadOnly(context.Background(), Config{Path: filepath.Base(path)}, dir); err == nil {
+			t.Fatal("OpenReadOnly() accepted broad database permissions")
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reader, err := OpenReadOnly(context.Background(), Config{Path: filepath.Base(path)}, dir)
+	if err != nil {
+		t.Fatalf("OpenReadOnly() error = %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenReadOnlyRejectsFutureSchemaAndCancellation(t *testing.T) {
+	dir := t.TempDir()
+	futurePath := filepath.Join(dir, "future.db")
+	database, err := sql.Open("sqlite", futurePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec("PRAGMA user_version = 99"); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(futurePath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenReadOnly(context.Background(), Config{Path: filepath.Base(futurePath)}, dir); err == nil {
+		t.Fatal("OpenReadOnly() accepted a future schema")
+	}
+
+	validPath := filepath.Join(dir, "valid.db")
+	writer, err := Open(context.Background(), Config{Path: filepath.Base(validPath)}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := OpenReadOnly(cancelled, Config{Path: filepath.Base(validPath)}, dir); err == nil {
+		t.Fatal("OpenReadOnly() accepted a cancelled context")
+	}
 }

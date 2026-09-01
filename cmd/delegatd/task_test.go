@@ -153,3 +153,88 @@ func (r *blockingReadCloser) Close() error {
 	r.once.Do(func() { close(r.closed) })
 	return nil
 }
+
+func TestRunRootAndTaskUsageContracts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want int
+	}{
+		{name: "root usage", args: nil, want: 2},
+		{name: "unknown command", args: []string{"unknown"}, want: 2},
+		{name: "task usage", args: []string{"task"}, want: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr strings.Builder
+			got := run(context.Background(), tc.args, io.NopCloser(strings.NewReader("")), &stdout, &stderr, commandDependencies{})
+			if got != tc.want || stdout.Len() != 0 {
+				t.Fatalf("exit=%d stdout=%q", got, stdout.String())
+			}
+			if tc.name == "task usage" {
+				if stderr.String() != taskSubmitUsage+"\n"+taskShowUsage+"\n" {
+					t.Fatalf("stderr=%q", stderr.String())
+				}
+			} else if stderr.String() != rootUsage+"\n" {
+				t.Fatalf("stderr=%q", stderr.String())
+			}
+		})
+	}
+	var stdout, stderr strings.Builder
+	if got := run(context.Background(), []string{"task", "--help"}, io.NopCloser(strings.NewReader("")), &stdout, &stderr, commandDependencies{}); got != 0 || stdout.String() != taskUsage+"\n" || stderr.Len() != 0 {
+		t.Fatalf("task help exit=%d stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
+}
+
+func TestRunTaskShowRejectsInvalidAndUnavailableRequests(t *testing.T) {
+	var stdout, stderr strings.Builder
+	if got := run(context.Background(), []string{"task", "show", "--config", "config.yaml", "invalid"}, io.NopCloser(strings.NewReader("")), &stdout, &stderr, commandDependencies{}); got != 2 || stdout.Len() != 0 || stderr.String() != taskShowUsage+"\n" {
+		t.Fatalf("invalid show exit=%d stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	validID := "task_" + strings.Repeat("A", 26)
+	if got := run(context.Background(), []string{"task", "show", "--config", "config.yaml", validID}, io.NopCloser(strings.NewReader("")), &stdout, &stderr, commandDependencies{}); got != 1 || stdout.String() != "FAIL task: task failed\n" || stderr.Len() != 0 {
+		t.Fatalf("unavailable show exit=%d stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
+}
+
+func TestReadTaskInputRejectsUnsafeFilesBeforeSubmission(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "invalid-input")
+	if err := os.WriteFile(filePath, []byte{0xff}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directoryPath := filepath.Join(dir, "directory")
+	if err := os.Mkdir(directoryPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oversizedPath := filepath.Join(dir, "oversized-input")
+	if err := os.WriteFile(oversizedPath, bytes.Repeat([]byte{'x'}, maxTaskInputSize+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{
+		"missing":   filepath.Join(dir, "missing"),
+		"directory": directoryPath,
+		"invalid":   filePath,
+		"oversized": oversizedPath,
+	} {
+		t.Run(name, func(t *testing.T) {
+			called := false
+			var stdout, stderr strings.Builder
+			args := []string{"task", "submit", "--config", "config.yaml", "--resource", "api-service", "--input-file", path}
+			got := run(context.Background(), args, io.NopCloser(strings.NewReader("")), &stdout, &stderr, commandDependencies{
+				submitTask: func(context.Context, string, string, domain.TaskInput) (domain.Task, error) {
+					called = true
+					return domain.Task{}, nil
+				},
+			})
+			if got != 1 || called || stderr.Len() != 0 || !strings.HasPrefix(stdout.String(), "FAIL task: task input ") {
+				t.Fatalf("exit=%d called=%v stdout=%q stderr=%q", got, called, stdout.String(), stderr.String())
+			}
+		})
+	}
+	var stdout, stderr strings.Builder
+	if got := run(context.Background(), []string{"task", "submit", "--config", "config.yaml", "--resource", "api-service", "--input-file", "-"}, nil, &stdout, &stderr, commandDependencies{}); got != 1 || stdout.String() != "FAIL task: task input is unreadable\n" || stderr.Len() != 0 {
+		t.Fatalf("nil stdin exit=%d stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
+}

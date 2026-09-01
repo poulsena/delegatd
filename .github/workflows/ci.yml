@@ -1,0 +1,179 @@
+name: CI
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+      - ready_for_review
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pr_policy:
+    name: PR policy
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out triggering ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Validate pull request policy
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: .github/scripts/check-pr-policy.sh
+      - name: Confirm non-PR policy bypass
+        if: github.event_name != 'pull_request'
+        run: printf '%s\n' 'PR policy is not evaluated outside pull_request events'
+
+  go_quality:
+    name: Go quality
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Run Go quality gate
+        run: make verify
+      - name: Upload coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: .cache/coverage.out
+          if-no-files-found: error
+          retention-days: 14
+
+  portability:
+    name: Portability (${{ matrix.goos }}-${{ matrix.goarch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            goos: linux
+            goarch: amd64
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+          - runner: macos-15-intel
+            goos: darwin
+            goarch: amd64
+          - runner: macos-15
+            goos: darwin
+            goarch: arm64
+          - runner: windows-2025
+            goos: windows
+            goarch: amd64
+          - runner: windows-11-arm
+            goos: windows
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Run native tests
+        run: go test -count=1 ./...
+      - name: Build and exercise native CLI
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          mkdir -p .cache
+          if [ "$GOOS" = windows ]; then binary_extension=.exe; else binary_extension=; fi
+          CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -buildvcs=true -o ".cache/delegatd$binary_extension" ./cmd/delegatd
+          ".cache/delegatd$binary_extension" doctor --help >.cache/doctor-help.out 2>.cache/doctor-help.err
+          test ! -s .cache/doctor-help.err
+          test "$(cat .cache/doctor-help.out)" = 'usage: delegatd doctor --config FILE [--timeout DURATION]'
+
+  release_dry_run:
+    name: Release dry run
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Run release dry run
+        run: make release-check VERSION=0.0.0
+
+  dependency_review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+
+  required_gate:
+    name: Required gate
+    if: always()
+    needs:
+      - pr_policy
+      - go_quality
+      - portability
+      - release_dry_run
+      - dependency_review
+    runs-on: ubuntu-24.04
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      PR_POLICY_RESULT: ${{ needs.pr_policy.result }}
+      GO_QUALITY_RESULT: ${{ needs.go_quality.result }}
+      PORTABILITY_RESULT: ${{ needs.portability.result }}
+      RELEASE_DRY_RUN_RESULT: ${{ needs.release_dry_run.result }}
+      DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency_review.result }}
+    steps:
+      - name: Enforce aggregate gate
+        run: |
+          set -euo pipefail
+          test "$PR_POLICY_RESULT" = success
+          test "$GO_QUALITY_RESULT" = success
+          test "$PORTABILITY_RESULT" = success
+          test "$RELEASE_DRY_RUN_RESULT" = success
+          if [ "$EVENT_NAME" = pull_request ]; then
+            test "$DEPENDENCY_REVIEW_RESULT" = success
+          else
+            test "$DEPENDENCY_REVIEW_RESULT" = success || test "$DEPENDENCY_REVIEW_RESULT" = skipped
+          fi

@@ -86,3 +86,35 @@ func TestTaskStoreContract(t *testing.T) {
 		return New()
 	})
 }
+
+func TestStoreRejectsCancelledAndInvalidDrafts(t *testing.T) {
+	draft := memoryDraft(t)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := New().CreateTask(cancelled, draft); err == nil || err.Error() != "task could not be submitted" {
+		t.Fatalf("cancelled CreateTask() error = %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*domain.TaskDraft)
+	}{
+		{name: "invalid task ID", mutate: func(value *domain.TaskDraft) { value.ID = "invalid" }},
+		{name: "invalid status", mutate: func(value *domain.TaskDraft) { value.Status = "running" }},
+		{name: "non-UTC creation", mutate: func(value *domain.TaskDraft) { value.CreatedAt = value.CreatedAt.In(time.FixedZone("local", 3600)) }},
+		{name: "invalid resource ID", mutate: func(value *domain.TaskDraft) { value.Resource.CandidateID = "invalid" }},
+		{name: "incomplete resource", mutate: func(value *domain.TaskDraft) { value.Resource.Name = "" }},
+		{name: "different configuration", mutate: func(value *domain.TaskDraft) { value.Configuration = value.Resource.RequestedPolicy }},
+		{name: "invalid snapshot", mutate: func(value *domain.TaskDraft) { value.Policy = domain.Snapshot{} }},
+		{name: "invalid history", mutate: func(value *domain.TaskDraft) { value.InitialHistory.Sequence = 2 }},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			value := memoryDraft(t)
+			testCase.mutate(&value)
+			if _, err := New().CreateTask(context.Background(), value); err == nil {
+				t.Fatal("invalid draft was accepted")
+			}
+		})
+	}
+}

@@ -78,3 +78,24 @@ func TestParseTaskIDRequiresBoundedRFC4648Base32(t *testing.T) {
 		}
 	}
 }
+
+func TestSnapshotRejectsMalformedValuesAndEmptyMarshal(t *testing.T) {
+	if _, err := NewSnapshot(func() {}); err == nil {
+		t.Fatal("NewSnapshot(function) error = nil")
+	}
+	for name, input := range map[string][]byte{
+		"empty":    nil,
+		"invalid":  []byte("{"),
+		"multiple": []byte(`{"a":1} {"b":2}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseSnapshot(input); err == nil {
+				t.Fatal("ParseSnapshot() error = nil")
+			}
+		})
+	}
+	var empty Snapshot
+	if _, err := empty.MarshalJSON(); err == nil {
+		t.Fatal("MarshalJSON(empty) error = nil")
+	}
+}

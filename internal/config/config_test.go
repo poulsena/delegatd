@@ -160,3 +160,30 @@ func writeConfiguration(t *testing.T, path, data string) {
 		t.Fatal(err)
 	}
 }
+
+func TestLoadValidatesConfiguredResources(t *testing.T) {
+	validResource := validConfiguration + `resources:
+  api-service:
+    kind: repository
+    connector: github-main
+    config: {}
+`
+	path := filepath.Join(t.TempDir(), "delegatd.yaml")
+	writeConfiguration(t, path, validResource)
+	if document, err := Load(path); err != nil || document.Config.Resources["api-service"].Connector != "github-main" {
+		t.Fatalf("Load(valid resource) = %#v, %v", document.Config.Resources, err)
+	}
+	for name, replacement := range map[string]string{
+		"invalid resource name": strings.Replace(validResource, "api-service:", "Api-service:", 1),
+		"unknown connector":     strings.Replace(validResource, "connector: github-main", "connector: missing", 1),
+		"scalar config":         strings.Replace(validResource, "    connector: github-main\n    config: {}\n", "    connector: github-main\n    config: invalid\n", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := filepath.Join(t.TempDir(), "delegatd.yaml")
+			writeConfiguration(t, candidate, replacement)
+			if _, err := Load(candidate); err == nil {
+				t.Fatal("Load() accepted invalid resource configuration")
+			}
+		})
+	}
+}

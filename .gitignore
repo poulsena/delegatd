@@ -1,0 +1,7 @@
+.cache/
+dist/
+coverage.out
+*.pem
+*.db
+*.db-shm
+*.db-wal

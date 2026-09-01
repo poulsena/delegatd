@@ -61,3 +61,29 @@ func TestResolveIntersectsActionsAndSortsProtectedPaths(t *testing.T) {
 		t.Fatalf("effective policy = %#v", got)
 	}
 }
+
+func TestNormalizeInstructionPathRejectsUnsafePaths(t *testing.T) {
+	if got, err := NormalizeInstructionPath(" docs/AGENTS.md "); err != nil || got != "docs/AGENTS.md" {
+		t.Fatalf("valid instruction path = %q, %v", got, err)
+	}
+	for _, value := range []string{"", "/absolute", "../parent", "docs//file", "docs/./file", "docs/../file", "docs\\file", "docs/*.md", "docs\x00file", "docs/"} {
+		if _, err := NormalizeInstructionPath(value); err == nil {
+			t.Fatalf("NormalizeInstructionPath(%q) error = nil", value)
+		}
+	}
+}
+
+func TestNormalizeRequestRejectsInvalidActionsDecisionsAndPaths(t *testing.T) {
+	for name, request := range map[string]domain.PolicyRequest{
+		"action name": {Actions: map[string]domain.PolicyDecision{"Invalid": domain.PolicyAllow}},
+		"decision":    {Actions: map[string]domain.PolicyDecision{"task.run": "unknown"}},
+		"path":        {ProtectedPaths: []string{"src//file"}},
+		"duplicate":   {ProtectedPaths: []string{"src/**", "src/**"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NormalizeRequest(request); err == nil {
+				t.Fatal("invalid policy request was accepted")
+			}
+		})
+	}
+}

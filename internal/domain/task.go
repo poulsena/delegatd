@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"regexp"
 	"strings"
@@ -265,17 +264,4 @@ func (k ResourceKind) String() string {
 
 func (d PolicyDecision) String() string {
 	return string(d)
-}
-
-func validateCanonicalSnapshot(s Snapshot) error {
-	if len(s.data) == 0 {
-		return errors.New("empty snapshot")
-	}
-	if len(s.data) > maxSnapshotSize {
-		return errors.New("snapshot exceeds 16 MiB")
-	}
-	if _, err := ParseSnapshot(s.data); err != nil {
-		return fmt.Errorf("invalid snapshot: %w", err)
-	}
-	return nil
 }

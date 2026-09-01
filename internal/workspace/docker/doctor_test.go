@@ -1,3 +1,5 @@
+//go:build !windows
+
 package docker
 
 import (
@@ -87,6 +89,24 @@ exit 0
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("timeout took %s", elapsed)
+	}
+}
+
+func TestDoctorCheckRejectsExtraAndNonStringVersionValues(t *testing.T) {
+	for name, script := range map[string]string{
+		"extra JSON value":   "#!/bin/sh\nprintf '%s' '\"29.7.2\" \"linux\" \"extra\"'\n",
+		"non-string version": "#!/bin/sh\nprintf '%s' '29.7.2 \"linux\"'\n",
+		"non-string OS":      "#!/bin/sh\nprintf '%s' '\"29.7.2\" 1'\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			binDir := t.TempDir()
+			writeExecutable(t, filepath.Join(binDir, "docker"), script)
+			t.Setenv("PATH", binDir)
+			_, failure := NewDoctorCheck("local", Config{}).Probe(context.Background())
+			if failure == nil || failure.Error() != "Docker version response is invalid" {
+				t.Fatalf("failure = %v", failure)
+			}
+		})
 	}
 }
 
