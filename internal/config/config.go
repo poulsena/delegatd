@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 
+	"github.com/poulsena/delegatd/internal/domain"
+	"github.com/poulsena/delegatd/internal/policy"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -25,13 +27,30 @@ type Document struct {
 	Config Config
 }
 
+// StoreDocument is the store-only projection used by offline inspection.
+type StoreDocument struct {
+	Path    string
+	Dir     string
+	Version int
+	Store   Instance
+}
+
 // Config is the version-one deployment envelope.
 type Config struct {
-	Version            int                 `yaml:"version"`
-	Store              Instance            `yaml:"store"`
-	Connectors         map[string]Instance `yaml:"connectors"`
-	WorkspaceProviders map[string]Instance `yaml:"workspace_providers"`
-	AgentRuntimes      map[string]Instance `yaml:"agent_runtimes"`
+	Version            int                  `yaml:"version"`
+	Store              Instance             `yaml:"store"`
+	Connectors         map[string]Instance  `yaml:"connectors"`
+	WorkspaceProviders map[string]Instance  `yaml:"workspace_providers"`
+	AgentRuntimes      map[string]Instance  `yaml:"agent_runtimes"`
+	Resources          map[string]Resource  `yaml:"resources"`
+	Policy             domain.PolicyRequest `yaml:"policy"`
+}
+
+// Resource is a logical allowlisted resource bound to a connector instance.
+type Resource struct {
+	Kind      domain.ResourceKind `yaml:"kind"`
+	Connector string              `yaml:"connector"`
+	Config    yaml.Node           `yaml:"config"`
 }
 
 // Instance selects one compiled adapter and owns its adapter-specific node.
@@ -78,28 +97,7 @@ func SafeReason(err error) string {
 
 // Load reads and validates one version-one deployment configuration.
 func Load(path string) (Document, error) {
-	absolutePath, err := filepath.Abs(path)
-	if err != nil {
-		return Document{}, validationError("configuration file is unreadable", err)
-	}
-
-	file, err := os.Open(absolutePath)
-	if err != nil {
-		return Document{}, validationError("configuration file is unreadable", err)
-	}
-	data, readErr := io.ReadAll(io.LimitReader(file, maxConfigurationSize+1))
-	closeErr := file.Close()
-	if readErr != nil || closeErr != nil {
-		if readErr != nil {
-			return Document{}, validationError("configuration file is unreadable", readErr)
-		}
-		return Document{}, validationError("configuration file is unreadable", closeErr)
-	}
-	if len(data) > maxConfigurationSize {
-		return Document{}, validationError("configuration exceeds 1 MiB", nil)
-	}
-
-	root, err := decodeSingleDocument(data)
+	absolutePath, dir, root, err := readRoot(path, true)
 	if err != nil {
 		return Document{}, err
 	}
@@ -111,7 +109,6 @@ func Load(path string) (Document, error) {
 	if err := Decode(root, &cfg); err != nil {
 		return Document{}, validationError("configuration YAML is invalid", err)
 	}
-
 	if cfg.Version != 1 {
 		return Document{}, validationError("version must be 1", nil)
 	}
@@ -146,12 +143,78 @@ func Load(path string) (Document, error) {
 	if err := validateInstances("agent_runtimes", "agent_runtime", cfg.AgentRuntimes); err != nil {
 		return Document{}, err
 	}
+	normalizedPolicy, err := policy.NormalizeRequest(cfg.Policy)
+	if err != nil {
+		return Document{}, validationError("configuration YAML is invalid", err)
+	}
+	cfg.Policy = normalizedPolicy
+	if err := validateResources(cfg); err != nil {
+		return Document{}, err
+	}
 
-	return Document{
-		Path:   absolutePath,
-		Dir:    filepath.Dir(absolutePath),
-		Config: cfg,
-	}, nil
+	return Document{Path: absolutePath, Dir: dir, Config: cfg}, nil
+}
+
+// LoadStore reads only the deployment version and store projection. All
+// unrelated top-level fields are intentionally ignored for offline inspection.
+func LoadStore(path string) (StoreDocument, error) {
+	absolutePath, dir, root, err := readRoot(path, false)
+	if err != nil {
+		return StoreDocument{}, err
+	}
+	version, versionOK := mappingValue(root, "version")
+	store, storeOK := mappingValue(root, "store")
+	if !versionOK || !storeOK || mappingCount(root, "version") != 1 || mappingCount(root, "store") != 1 {
+		return StoreDocument{}, validationError("configuration YAML is invalid", nil)
+	}
+	if containsAlias(version) || containsAlias(store) || containsEnvironmentInterpolation(store) {
+		return StoreDocument{}, validationError("configuration YAML is invalid", nil)
+	}
+	projection := yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+		scalarNode("version"), &version,
+		scalarNode("store"), &store,
+	}}
+	var decoded struct {
+		Version int      `yaml:"version"`
+		Store   Instance `yaml:"store"`
+	}
+	if err := Decode(projection, &decoded); err != nil {
+		return StoreDocument{}, validationError("configuration YAML is invalid", err)
+	}
+	if decoded.Version != 1 {
+		return StoreDocument{}, validationError("version must be 1", nil)
+	}
+	if err := validateInstance("store", decoded.Store); err != nil {
+		return StoreDocument{}, err
+	}
+	return StoreDocument{Path: absolutePath, Dir: dir, Version: decoded.Version, Store: decoded.Store}, nil
+}
+
+func readRoot(path string, rejectAliases bool) (string, string, yaml.Node, error) {
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return "", "", yaml.Node{}, validationError("configuration file is unreadable", err)
+	}
+	file, err := os.Open(absolutePath)
+	if err != nil {
+		return "", "", yaml.Node{}, validationError("configuration file is unreadable", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, maxConfigurationSize+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		if readErr != nil {
+			return "", "", yaml.Node{}, validationError("configuration file is unreadable", readErr)
+		}
+		return "", "", yaml.Node{}, validationError("configuration file is unreadable", closeErr)
+	}
+	if len(data) > maxConfigurationSize {
+		return "", "", yaml.Node{}, validationError("configuration exceeds 1 MiB", nil)
+	}
+	root, err := decodeSingleDocument(data, rejectAliases)
+	if err != nil {
+		return "", "", yaml.Node{}, err
+	}
+	return absolutePath, filepath.Dir(absolutePath), root, nil
 }
 func Decode(node yaml.Node, dst any) error {
 	if node.Kind == yaml.DocumentNode {
@@ -182,7 +245,7 @@ func Decode(node yaml.Node, dst any) error {
 	return nil
 }
 
-func decodeSingleDocument(data []byte) (yaml.Node, error) {
+func decodeSingleDocument(data []byte, rejectAliases bool) (yaml.Node, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	var document yaml.Node
 	if err := decoder.Decode(&document); err != nil {
@@ -193,6 +256,9 @@ func decodeSingleDocument(data []byte) (yaml.Node, error) {
 	}
 	root := *document.Content[0]
 	if root.Kind != yaml.MappingNode {
+		return yaml.Node{}, validationError("configuration YAML is invalid", nil)
+	}
+	if rejectAliases && containsAlias(root) {
 		return yaml.Node{}, validationError("configuration YAML is invalid", nil)
 	}
 
@@ -221,6 +287,36 @@ func mappingValue(node yaml.Node, key string) (yaml.Node, bool) {
 	}
 	return yaml.Node{}, false
 }
+
+func mappingCount(node yaml.Node, key string) int {
+	if node.Kind != yaml.MappingNode {
+		return 0
+	}
+	count := 0
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		if node.Content[index].Value == key {
+			count++
+		}
+	}
+	return count
+}
+
+func scalarNode(value string) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+}
+
+func containsAlias(node yaml.Node) bool {
+	if node.Kind == yaml.AliasNode {
+		return true
+	}
+	for _, child := range node.Content {
+		if child != nil && containsAlias(*child) {
+			return true
+		}
+	}
+	return false
+}
+
 func containsEnvironmentInterpolation(node yaml.Node) bool {
 	if node.Kind == yaml.ScalarNode && environmentInterpolationPattern.MatchString(node.Value) {
 		return true
@@ -231,6 +327,34 @@ func containsEnvironmentInterpolation(node yaml.Node) bool {
 		}
 	}
 	return false
+}
+
+func validateResources(cfg Config) error {
+	names := make([]string, 0, len(cfg.Resources))
+	for name := range cfg.Resources {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		resource := cfg.Resources[name]
+		if !instanceNamePattern.MatchString(name) {
+			return validationError("resources contains an invalid instance name", nil)
+		}
+		checkID := "resource." + name
+		if !validKind(string(resource.Kind)) {
+			return validationError(checkID+" kind is missing or invalid", nil)
+		}
+		if !instanceNamePattern.MatchString(resource.Connector) {
+			return validationError(checkID+" connector is missing or invalid", nil)
+		}
+		if _, ok := cfg.Connectors[resource.Connector]; !ok {
+			return validationError(checkID+" connector is unknown", nil)
+		}
+		if resource.Config.Kind != yaml.MappingNode {
+			return validationError(checkID+" configuration is invalid", nil)
+		}
+	}
+	return nil
 }
 
 func validateInstance(section string, instance Instance) error {
