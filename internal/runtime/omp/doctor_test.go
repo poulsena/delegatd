@@ -2,7 +2,9 @@ package omp
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,6 +35,54 @@ cat >/dev/null
 	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Fatalf("flood probe took %s", elapsed)
 	}
+}
+func TestDoctorCheckWaitsForOMPHelperOutputDrainBeforeWait(t *testing.T) {
+	binDir := t.TempDir()
+	ompPath := filepath.Join(binDir, "omp")
+	testBinary := strings.ReplaceAll(os.Args[0], "'", "'\\''")
+	writeExecutable(t, ompPath, "#!/bin/sh\nexec '"+testBinary+"' -test.run=^TestOMPHelperProcess$\n")
+	t.Setenv("PATH", binDir)
+	t.Setenv("GO_WANT_OMP_HELPER", "1")
+	statusPath := filepath.Join(binDir, "status")
+	t.Setenv("GO_OMP_HELPER_STATUS", statusPath)
+
+	check := NewDoctorCheck("omp-primary", Config{})
+	if detail, failure := check.Probe(context.Background()); failure != nil || detail != "OMP RPC protocol 1" {
+		t.Fatalf("detail=%q failure=%v", detail, failure)
+	}
+	status, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(status) != "write succeeded" {
+		t.Fatalf("helper output status = %q", status)
+	}
+}
+
+func TestOMPHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_OMP_HELPER") != "1" {
+		return
+	}
+	if os.Getenv("GO_WANT_OMP_CHILD") == "1" {
+		time.Sleep(100 * time.Millisecond)
+		_, err := os.Stdout.Write([]byte(strings.Repeat("late shutdown notification\n", 200000)))
+		status := "write succeeded"
+		if err != nil {
+			status = err.Error()
+		}
+		_ = os.WriteFile(os.Getenv("GO_OMP_HELPER_STATUS"), []byte(status), 0o600)
+		return
+	}
+
+	_, _ = fmt.Fprintln(os.Stdout, `{"type":"ready","protocolVersion":1}`)
+	child := exec.Command(os.Args[0], "-test.run=^TestOMPHelperProcess$")
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
+	child.Env = append(os.Environ(), "GO_WANT_OMP_CHILD=1")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	os.Exit(0)
 }
 
 func TestDoctorCheckMapsOMPFailuresWithoutChildOutput(t *testing.T) {

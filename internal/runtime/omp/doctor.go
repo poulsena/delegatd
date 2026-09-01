@@ -95,8 +95,21 @@ func probe(ctx context.Context) (string, *doctor.Failure) {
 		_, err := io.Copy(io.Discard, reader)
 		drainDone <- err
 	}()
-	waitErr := command.Wait()
+	drainStop := make(chan struct{})
+	defer close(drainStop)
+	go func() {
+		select {
+		case <-probeContext.Done():
+			// A canceled probe may leave a child process holding stdout open.
+			// Close the read end so the drain cannot outlive process cleanup.
+			_ = stdout.Close()
+		case <-drainStop:
+		}
+	}()
+	// StdoutPipe documents that all reads must finish before Wait closes the
+	// pipe. Waiting for the drain first preserves valid shutdown output.
 	drainErr := <-drainDone
+	waitErr := command.Wait()
 	if waitErr != nil || drainErr != nil {
 		if waitErr != nil {
 			return "", doctor.NewFailure("OMP RPC did not shut down cleanly", waitErr)

@@ -50,7 +50,9 @@ func probe(ctx context.Context, cfg Config, dir string) (string, *doctor.Failure
 		return "", doctor.NewFailure("SQLite path is not a regular file", nil)
 	}
 
-	dsn := "file:" + url.PathEscape(filepath.ToSlash(path)) + "?mode=ro&_pragma=query_only(1)"
+	// immutable prevents SQLite's read-only WAL connection from creating -wal
+	// or -shm sidecars while the diagnosis only reads stable database metadata.
+	dsn := "file:" + url.PathEscape(filepath.ToSlash(path)) + "?mode=ro&immutable=1&_pragma=query_only(1)"
 	database, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return "", doctor.NewFailure("SQLite database could not be opened read-only", err)

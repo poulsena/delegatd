@@ -50,6 +50,55 @@ func TestDoctorCheckOpensRelativeDatabaseReadOnly(t *testing.T) {
 		}
 	}
 }
+func TestDoctorCheckDoesNotCreateSQLiteWALSidecars(t *testing.T) {
+	dir := t.TempDir()
+	databasePath := filepath.Join(dir, "state.db")
+	createWALDatabase(t, databasePath)
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := os.Remove(databasePath + suffix); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	beforeEntries := directoryEntries(t, dir)
+
+	check := NewDoctorCheck(Config{Path: filepath.Base(databasePath)}, dir)
+	detail, failure := check.Probe(context.Background())
+	if failure != nil || len(detail) <= len("SQLite ") || detail[:len("SQLite ")] != "SQLite " {
+		t.Fatalf("detail=%q failure=%v", detail, failure)
+	}
+
+	afterEntries := directoryEntries(t, dir)
+	if len(afterEntries) != len(beforeEntries) {
+		t.Fatalf("directory entries changed: before=%v after=%v", beforeEntries, afterEntries)
+	}
+	for name := range beforeEntries {
+		if !gotEntry(afterEntries, name) {
+			t.Fatalf("directory entry %q disappeared", name)
+		}
+	}
+}
+
+func createWALDatabase(t *testing.T, path string) {
+	t.Helper()
+	dsn := "file:" + url.PathEscape(filepath.ToSlash(path)) + "?mode=rwc"
+	database, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mode string
+	if err := database.QueryRow("PRAGMA journal_mode = WAL").Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "wal" {
+		t.Fatalf("journal mode = %q, want wal", mode)
+	}
+	if _, err := database.Exec("CREATE TABLE sample (value TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestDoctorCheckMapsSQLitePathAndProbeFailures(t *testing.T) {
 	dir := t.TempDir()

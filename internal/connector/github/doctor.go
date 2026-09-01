@@ -126,6 +126,9 @@ func probe(ctx context.Context, cfg Config, dir string, options doctorOptions) (
 		return "", doctor.NewFailure("GitHub API is unavailable", err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusForbidden && githubRateLimited(response) {
+		return "", doctor.NewFailure("GitHub API is unavailable", nil)
+	}
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 		return "", doctor.NewFailure("GitHub App authentication was rejected", nil)
 	}
@@ -147,6 +150,11 @@ func probe(ctx context.Context, cfg Config, dir string, options doctorOptions) (
 		return "", doctor.NewFailure("GitHub App identity does not match app_id", nil)
 	}
 	return "GitHub App authenticated", nil
+}
+
+func githubRateLimited(response *http.Response) bool {
+	return strings.TrimSpace(response.Header.Get("X-RateLimit-Remaining")) == "0" ||
+		strings.TrimSpace(response.Header.Get("Retry-After")) != ""
 }
 
 func parseRSAKey(data []byte) (*rsa.PrivateKey, error) {
