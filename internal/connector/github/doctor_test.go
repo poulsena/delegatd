@@ -109,6 +109,7 @@ func TestDoctorCheckMapsAuthenticationAndResponseFailures(t *testing.T) {
 		{name: "rate limited", status: http.StatusForbidden, headers: map[string]string{"X-RateLimit-Remaining": "0"}, body: "body-secret-sentinel", wantReason: "GitHub API is unavailable"},
 		{name: "primary rate limit", status: http.StatusTooManyRequests, headers: map[string]string{"X-RateLimit-Remaining": "0"}, body: "body-secret-sentinel", wantReason: "GitHub API is unavailable"},
 		{name: "secondary rate limit", status: http.StatusTooManyRequests, headers: map[string]string{"Retry-After": "1"}, body: "body-secret-sentinel", wantReason: "GitHub API is unavailable"},
+		{name: "headerless secondary rate limit", status: http.StatusTooManyRequests, body: "body-secret-sentinel", wantReason: "GitHub API is unavailable"},
 		{name: "server error", status: http.StatusBadGateway, body: "body-secret-sentinel", wantReason: "GitHub App check returned HTTP 502"},
 		{name: "malformed", status: http.StatusOK, body: "body-secret-sentinel", wantReason: "GitHub App response is invalid"},
 		{name: "identity mismatch", status: http.StatusOK, body: `{"id":2}`, wantReason: "GitHub App identity does not match app_id"},
