@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync"
+	"time"
 
 	"github.com/poulsena/delegatd/internal/doctor"
 )
@@ -50,71 +52,91 @@ func probe(ctx context.Context) (string, *doctor.Failure) {
 		"--no-pty",
 		"--cwd", os.TempDir(),
 	)
-	stdout, err := command.StdoutPipe()
+	// An explicit pipe lets Wait observe the main process independently of
+	// descendants that inherit stdout. StdoutPipe's implicit close can race
+	// with the drain, while waiting for EOF first can block forever.
+	stdoutReader, stdoutWriter, err := os.Pipe()
 	if err != nil {
 		return "", doctor.NewFailure("OMP RPC did not become ready", err)
 	}
+	command.Stdout = stdoutWriter
+	// nil connects stderr directly to the null device. Using io.Discard would
+	// make os/exec copy through a pipe that an orphaned child could keep open.
+	command.Stderr = nil
 	stdin, err := command.StdinPipe()
 	if err != nil {
+		_ = stdoutReader.Close()
+		_ = stdoutWriter.Close()
 		return "", doctor.NewFailure("OMP RPC did not become ready", err)
 	}
-	command.Stderr = io.Discard
 	if err := command.Start(); err != nil {
+		_ = stdoutReader.Close()
+		_ = stdoutWriter.Close()
 		return "", doctor.NewFailure("OMP RPC did not become ready", err)
 	}
+	// The child owns its duplicate of the write end after Start.
+	_ = stdoutWriter.Close()
 
-	reader := bufio.NewReader(stdout)
-	frame, frameErr := readReadyFrame(reader)
-	if frameErr != nil {
-		cancel()
-		_ = command.Wait()
-		return "", doctor.NewFailure("OMP RPC did not become ready", frameErr)
+	var closeReaderOnce sync.Once
+	closeReader := func() {
+		closeReaderOnce.Do(func() {
+			_ = stdoutReader.Close()
+		})
 	}
-	ready, protocolErr := readyFrame(frame)
-	if protocolErr != nil {
-		cancel()
-		_ = command.Wait()
-		if errors.Is(protocolErr, errProtocolUnavailable) {
-			return "", doctor.NewFailure("OMP RPC protocol 1 is unavailable", protocolErr)
-		}
-		return "", doctor.NewFailure("OMP RPC did not become ready", protocolErr)
-	}
-	if !ready {
-		cancel()
-		_ = command.Wait()
-		return "", doctor.NewFailure("OMP RPC protocol 1 is unavailable", nil)
-	}
-
-	if err := stdin.Close(); err != nil {
-		cancel()
-		_ = command.Wait()
-		return "", doctor.NewFailure("OMP RPC did not shut down cleanly", err)
-	}
-	drainDone := make(chan error, 1)
-	go func() {
-		_, err := io.Copy(io.Discard, reader)
-		drainDone <- err
-	}()
-	drainStop := make(chan struct{})
-	defer close(drainStop)
+	watchStop := make(chan struct{})
+	defer close(watchStop)
+	defer closeReader()
 	go func() {
 		select {
 		case <-probeContext.Done():
-			// A canceled probe may leave a child process holding stdout open.
-			// Close the read end so the drain cannot outlive process cleanup.
-			_ = stdout.Close()
-		case <-drainStop:
+			closeReader()
+		case <-watchStop:
 		}
 	}()
-	// StdoutPipe documents that all reads must finish before Wait closes the
-	// pipe. Waiting for the drain first preserves valid shutdown output.
-	drainErr := <-drainDone
-	waitErr := command.Wait()
-	if waitErr != nil || drainErr != nil {
-		if waitErr != nil {
-			return "", doctor.NewFailure("OMP RPC did not shut down cleanly", waitErr)
+	stopBeforeReady := func(reason string, cause error) (string, *doctor.Failure) {
+		cancel()
+		_ = command.Wait()
+		closeReader()
+		return "", doctor.NewFailure(reason, cause)
+	}
+
+	reader := bufio.NewReader(stdoutReader)
+	frame, frameErr := readReadyFrame(reader)
+	if frameErr != nil {
+		return stopBeforeReady("OMP RPC did not become ready", frameErr)
+	}
+	ready, protocolErr := readyFrame(frame)
+	if protocolErr != nil {
+		if errors.Is(protocolErr, errProtocolUnavailable) {
+			return stopBeforeReady("OMP RPC protocol 1 is unavailable", protocolErr)
 		}
-		return "", doctor.NewFailure("OMP RPC did not shut down cleanly", drainErr)
+		return stopBeforeReady("OMP RPC did not become ready", protocolErr)
+	}
+	if !ready {
+		return stopBeforeReady("OMP RPC protocol 1 is unavailable", nil)
+	}
+
+	if err := stdin.Close(); err != nil {
+		return stopBeforeReady("OMP RPC did not shut down cleanly", err)
+	}
+	drainDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, reader)
+		close(drainDone)
+	}()
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- command.Wait()
+	}()
+	waitErr := <-waitDone
+	// A descendant may still own the write end after the main process exits.
+	// Set an immediate deadline before closing our read end so the drain
+	// cannot keep the diagnosis blocked.
+	_ = stdoutReader.SetReadDeadline(time.Now())
+	closeReader()
+	<-drainDone
+	if waitErr != nil {
+		return "", doctor.NewFailure("OMP RPC did not shut down cleanly", waitErr)
 	}
 	return "OMP RPC protocol 1", nil
 }

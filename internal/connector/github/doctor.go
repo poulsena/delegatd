@@ -126,7 +126,7 @@ func probe(ctx context.Context, cfg Config, dir string, options doctorOptions) (
 		return "", doctor.NewFailure("GitHub API is unavailable", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode == http.StatusForbidden && githubRateLimited(response) {
+	if (response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusTooManyRequests) && githubRateLimited(response) {
 		return "", doctor.NewFailure("GitHub API is unavailable", nil)
 	}
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
