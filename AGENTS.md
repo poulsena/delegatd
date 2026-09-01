@@ -4,6 +4,7 @@
 
 ## Development loop
 
+- Use a dedicated git worktree for every change; keep the primary checkout unchanged.
 - Use TDD. Start each implementation change with a failing test at the narrowest public boundary that expresses the observable behavior. Make it pass with the smallest correct change, then run the focused test and the relevant broader checks.
 - Work in vertical slices. Start at a real system boundary and finish at an observable result or safe rejection. Include the schema, policy check, audit record, failure handling, test, and documentation required by that slice.
 - Prefer surgical edits over large refactors. Change only what the current slice requires; reserve a broad refactor for cases where the slice cannot be correct without it, and make that necessity explicit.
