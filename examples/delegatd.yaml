@@ -1,0 +1,23 @@
+version: 1
+
+store:
+  kind: sqlite
+  config:
+    path: ./state.db
+
+connectors:
+  github-main:
+    kind: github
+    config:
+      app_id: 123456
+      private_key_file: ./github-app.pem
+
+workspace_providers:
+  docker-local:
+    kind: docker
+    config: {}
+
+agent_runtimes:
+  omp-primary:
+    kind: omp
+    config: {}
