@@ -24,7 +24,7 @@ The trusted coordinator is the only component allowed to mint or use the reposit
 
 An agent never uses the owner credential to push, approve, or merge. The coordinator uses the dedicated `delegatd-agent-1352096391` App identity for ordinary branch publication and pull-request creation. Because that App deliberately lacks Workflows permission, the human owner pushes any branch containing `.github/workflows/**`; the owner then performs every approval and merge.
 
-After the final push, the human owner reviews the complete pull request and approves it fresh. Merges are squash-only and performed by the owner after all required checks and CODEOWNER review pass. Do not enable automatic merging or bypass the required gate.
+After the final push, the human owner reviews the complete pull request and approves it fresh. Before completing the squash, inspect GitHub’s generated squash commit message and remove any auto-generated `Co-authored-by:` trailers; co-author trails are not permitted. Merges are squash-only and performed by the owner after all required checks and CODEOWNER review pass. Do not enable automatic merging or bypass the required gate.
 
 ## Releases
 
