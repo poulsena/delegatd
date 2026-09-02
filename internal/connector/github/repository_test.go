@@ -86,6 +86,9 @@ func TestRepositorySnapshotReadsReadOnlySourceAndPinsRevision(t *testing.T) {
 		totalTimeout:   time.Second,
 		requestTimeout: time.Second,
 	})
+	if err != nil {
+		t.Fatalf("newRepositorySource() error = %v", err)
+	}
 	material, err := source.Snapshot(context.Background())
 	if err != nil {
 		t.Fatalf("Snapshot() error = %v", err)
@@ -146,6 +149,9 @@ func TestRepositorySnapshotUsesEmptyDefaultWhenConfigurationIsMissing(t *testing
 		baseURL:      server.URL,
 		totalTimeout: time.Second,
 	})
+	if err != nil {
+		t.Fatalf("newRepositorySource() error = %v", err)
+	}
 	material, err := source.Snapshot(context.Background())
 	if err != nil {
 		t.Fatalf("Snapshot() error = %v", err)
@@ -176,6 +182,9 @@ func TestRepositorySnapshotRejectsInvalidResourceAndTimeout(t *testing.T) {
 		totalTimeout:   20 * time.Millisecond,
 		requestTimeout: 20 * time.Millisecond,
 	})
+	if err != nil {
+		t.Fatalf("newRepositorySource() error = %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if _, err := source.Snapshot(ctx); err == nil || !strings.Contains(err.Error(), "repository is unavailable") {

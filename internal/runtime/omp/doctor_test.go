@@ -1,3 +1,5 @@
+//go:build !windows
+
 package omp
 
 import (
@@ -40,7 +42,7 @@ func TestDoctorCheckDoesNotWaitForDescendantHoldingStdout(t *testing.T) {
 	binDir := t.TempDir()
 	writeExecutable(t, filepath.Join(binDir, "omp"), `#!/bin/sh
 printf '%s\n' '{"type":"ready","protocolVersion":1}'
-(/bin/sleep 2) &
+(/bin/sleep 5) &
 exit 0
 `)
 	t.Setenv("PATH", binDir)
@@ -61,7 +63,7 @@ exit 0
 		if got.failure != nil || got.detail != "OMP RPC protocol 1" {
 			t.Fatalf("detail=%q failure=%v", got.detail, got.failure)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatal("probe waited for descendant stdout to close")
 	}
 }

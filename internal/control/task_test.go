@@ -150,3 +150,127 @@ func TestSubmitManualRepositoryMaterializesEmptyRepositoryCollections(t *testing
 		}
 	}
 }
+
+func TestTaskServiceRejectsCancellationAndInvalidState(t *testing.T) {
+	service := NewTaskService(nil, nil, nil)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	input := domain.TaskInput{Version: 1, Source: domain.TaskSourceManual, Instructions: "instructions"}
+	if _, err := service.SubmitManualRepository(cancelled, "resource", "connector", input, domain.PolicyRequest{}, repositorySourceFunc(func(context.Context) (domain.RepositoryMaterial, error) { return domain.RepositoryMaterial{}, nil })); err == nil || err.Error() != "task cancelled" {
+		t.Fatalf("cancelled submit error = %v", err)
+	}
+	if _, err := service.Show(cancelled, domain.TaskID("task_"+strings.Repeat("A", 26))); err == nil || err.Error() != "task cancelled" {
+		t.Fatalf("cancelled show error = %v", err)
+	}
+	if _, err := service.SubmitManualRepository(context.Background(), "resource", "connector", input, domain.PolicyRequest{}, nil); err == nil || err.Error() != "task failed" {
+		t.Fatalf("unconfigured submit error = %v", err)
+	}
+	if _, err := service.Show(context.Background(), domain.TaskID("task_"+strings.Repeat("A", 26))); err == nil || err.Error() != "state store is unavailable" {
+		t.Fatalf("unconfigured show error = %v", err)
+	}
+}
+
+func TestTaskServiceMapsStoreFailureAndInvalidIDs(t *testing.T) {
+	store := &failingTaskStore{err: safeReasonCause{}}
+	service := NewTaskService(store, nil, nil)
+	validID := domain.TaskID("task_" + strings.Repeat("A", 26))
+	if _, err := service.Show(context.Background(), "invalid"); err == nil || err.Error() != "task not found" {
+		t.Fatalf("invalid ID error = %v", err)
+	}
+	if _, err := service.Show(context.Background(), validID); err == nil || err.Error() != "safe cause" || !errors.Is(err, store.err) {
+		t.Fatalf("store failure = %v", err)
+	}
+}
+
+type safeReasonCause struct{}
+
+func (safeReasonCause) Error() string { return "underlying secret" }
+
+func (safeReasonCause) SafeReason() string { return "safe cause" }
+
+type failingTaskStore struct {
+	err error
+}
+
+func (s *failingTaskStore) CreateTask(context.Context, domain.TaskDraft) (domain.Task, error) {
+	return domain.Task{}, s.err
+}
+
+func (s *failingTaskStore) Task(context.Context, domain.TaskID) (domain.Task, error) {
+	return domain.Task{}, s.err
+}
+
+func TestSubmitManualRepositoryRejectsInvalidPublicInputs(t *testing.T) {
+	input := domain.TaskInput{Version: 1, Source: domain.TaskSourceManual, Instructions: "instructions"}
+	material := domain.RepositoryMaterial{
+		ExternalRef:      "acme/api",
+		ExternalIdentity: "123",
+		Revision:         "revision-v1",
+		Configuration:    domain.RepositoryConfiguration{Version: 1},
+	}
+	cases := []struct {
+		name      string
+		input     domain.TaskInput
+		operator  domain.PolicyRequest
+		material  domain.RepositoryMaterial
+		newID     func(string) string
+		now       func() time.Time
+		wantCause string
+	}{
+		{name: "incomplete repository material", input: input, material: domain.RepositoryMaterial{Configuration: domain.RepositoryConfiguration{Version: 1}}, wantCause: "repository configuration is invalid"},
+		{name: "invalid input version", input: domain.TaskInput{Version: 2, Source: domain.TaskSourceManual, Instructions: "instructions"}, material: material, wantCause: "task input is invalid"},
+		{name: "invalid input source", input: domain.TaskInput{Version: 1, Source: "other", Instructions: "instructions"}, material: material, wantCause: "task input is invalid"},
+		{name: "empty input", input: domain.TaskInput{Version: 1, Source: domain.TaskSourceManual}, material: material, wantCause: "task input is invalid"},
+		{name: "invalid operator policy", input: input, operator: domain.PolicyRequest{Actions: map[string]domain.PolicyDecision{"Invalid": domain.PolicyAllow}}, material: material, wantCause: "task failed"},
+		{name: "zero clock", input: input, material: material, now: func() time.Time { return time.Time{} }, wantCause: "task failed"},
+		{name: "invalid generated ID", input: input, material: material, newID: func(string) string { return "bad" }, wantCause: "task failed"},
+		{name: "invalid generated resource ID", input: input, material: material, newID: func(prefix string) string {
+			if prefix == "task_" {
+				return prefix + strings.Repeat("A", 26)
+			}
+			return "bad"
+		}, wantCause: "task failed"},
+		{name: "invalid repository policy", input: input, material: domain.RepositoryMaterial{ExternalRef: "acme/api", ExternalIdentity: "123", Revision: "revision-v1", Configuration: domain.RepositoryConfiguration{Version: 1, Policy: domain.PolicyRequest{Actions: map[string]domain.PolicyDecision{"Invalid": domain.PolicyAllow}}}}, wantCause: "repository configuration is invalid"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := &recordingTaskStore{}
+			newID := testCase.newID
+			if newID == nil {
+				newID = func(prefix string) string { return prefix + strings.Repeat("A", 26) }
+			}
+			now := testCase.now
+			if now == nil {
+				now = func() time.Time { return time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC) }
+			}
+			service := NewTaskService(store, newID, now)
+			if _, err := service.SubmitManualRepository(context.Background(), "api-service", "github-main", testCase.input, testCase.operator, repositorySourceFunc(func(context.Context) (domain.RepositoryMaterial, error) { return testCase.material, nil })); err == nil || err.Error() != testCase.wantCause {
+				t.Fatalf("SubmitManualRepository() error = %v, want %q", err, testCase.wantCause)
+			}
+			if store.creates != 0 {
+				t.Fatalf("store creates = %d, want 0", store.creates)
+			}
+		})
+	}
+}
+
+func TestSubmitManualRepositoryMapsCreateFailureSafely(t *testing.T) {
+	input := domain.TaskInput{Version: 1, Source: domain.TaskSourceManual, Instructions: "instructions"}
+	material := domain.RepositoryMaterial{ExternalRef: "acme/api", ExternalIdentity: "123", Revision: "revision-v1", Configuration: domain.RepositoryConfiguration{Version: 1}}
+	cause := errors.New("store-secret")
+	store := &failingTaskStore{err: cause}
+	service := NewTaskService(store, func(prefix string) string { return prefix + strings.Repeat("A", 26) }, func() time.Time { return time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC) })
+	_, err := service.SubmitManualRepository(context.Background(), "api-service", "github-main", input, domain.PolicyRequest{}, repositorySourceFunc(func(context.Context) (domain.RepositoryMaterial, error) { return material, nil }))
+	if err == nil || err.Error() != "task failed" || !errors.Is(err, cause) {
+		t.Fatalf("SubmitManualRepository() error = %v", err)
+	}
+}
+
+func TestSafeReasonProvidesStablePublicFallback(t *testing.T) {
+	if got := SafeReason(NewFailure("repository unavailable", errors.New("private token"))); got != "repository unavailable" {
+		t.Fatalf("SafeReason(safe failure) = %q", got)
+	}
+	if got := SafeReason(errors.New("private token")); got != "task failed" {
+		t.Fatalf("SafeReason(generic failure) = %q", got)
+	}
+}

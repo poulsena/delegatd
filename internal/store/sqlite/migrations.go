@@ -10,42 +10,6 @@ import (
 
 const currentSchemaVersion = 1
 
-const schemaV1 = `
-CREATE TABLE resources (
-  id TEXT PRIMARY KEY NOT NULL,
-  name TEXT NOT NULL UNIQUE,
-  kind TEXT NOT NULL,
-  connector_instance TEXT NOT NULL,
-  external_ref TEXT NOT NULL,
-  external_identity TEXT NOT NULL,
-  revision TEXT NOT NULL,
-  configuration_json BLOB NOT NULL,
-  policy_request_json BLOB NOT NULL,
-  onboarded_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  UNIQUE (connector_instance, external_identity)
-) STRICT;
-CREATE TABLE tasks (
-  id TEXT PRIMARY KEY NOT NULL,
-  resource_id TEXT NOT NULL REFERENCES resources(id),
-  status TEXT NOT NULL,
-  resource_json BLOB NOT NULL,
-  input_json BLOB NOT NULL,
-  configuration_json BLOB NOT NULL,
-  policy_json BLOB NOT NULL,
-  created_at TEXT NOT NULL
-) STRICT;
-CREATE TABLE task_history (
-  task_id TEXT NOT NULL REFERENCES tasks(id),
-  sequence INTEGER NOT NULL CHECK (sequence > 0),
-  status TEXT NOT NULL,
-  occurred_at TEXT NOT NULL,
-  reason TEXT NOT NULL,
-  PRIMARY KEY (task_id, sequence)
-) STRICT;
-PRAGMA user_version = 1;
-`
-
 func migrate(ctx context.Context, database *sql.DB) error {
 	version, err := databaseSchemaVersion(ctx, database)
 	if err != nil {

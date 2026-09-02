@@ -7,10 +7,10 @@ and exposes the pending task for inspection. It does not execute the task.
 
 ## Prerequisites
 
-- Go 1.27.0 for development.
+- Go 1.27.0 for development and release builds.
 - A GitHub App with Metadata: read and Contents: read permissions on the
   allowlisted repository. No write permission is needed by this workflow.
-- A GitHub App ID and RSA private key. The key file must be regular and have
+- A GitHub App ID and RSA private key. The key file must be a regular file with
   owner-only permissions (`0600` or stricter on Unix).
 - A CGO-free SQLite-compatible state database file is not required in advance:
   `task submit` creates and migrates it. The parent directory must already
@@ -112,3 +112,54 @@ start Docker or OMP, run validation commands, mutate repository content, or
 publish external changes. Repository onboarding in this slice is the
 connector-backed read-only snapshot of an explicitly configured allowlist; it
 does not grant access beyond the GitHub App and `delegatd` resource policy.
+
+## Verification and releases
+
+Run the local gates before opening a pull request:
+
+```sh
+make verify
+make release-check VERSION=0.0.0
+```
+
+The deterministic release check produces these six archives:
+
+```text
+delegatd_0.0.0_darwin_amd64.tar.gz
+delegatd_0.0.0_darwin_arm64.tar.gz
+delegatd_0.0.0_linux_amd64.tar.gz
+delegatd_0.0.0_linux_arm64.tar.gz
+delegatd_0.0.0_windows_amd64.zip
+delegatd_0.0.0_windows_arm64.zip
+```
+
+Each archive is accompanied by a matching `.spdx.json` document and the release includes `SHA256SUMS`. Verify downloaded files with the platform-native checksum command:
+
+```sh
+# Linux
+sha256sum -c SHA256SUMS
+
+# macOS
+shasum -a 256 -c SHA256SUMS
+```
+
+On Windows PowerShell, compare every line in `SHA256SUMS` with `Get-FileHash`:
+
+```powershell
+Get-Content .\SHA256SUMS | ForEach-Object {
+  $expected, $file = $_ -split '  ', 2
+  $actual = (Get-FileHash -Algorithm SHA256 $file).Hash.ToLowerInvariant()
+  if ($actual -ne $expected) { throw "checksum mismatch: $file" }
+}
+```
+
+Inspect every downloaded SPDX JSON document as a human, then verify GitHub provenance for every downloaded asset:
+
+```sh
+for asset in delegatd_0.0.0_*.tar.gz delegatd_0.0.0_*.zip \
+  delegatd_0.0.0_*.spdx.json SHA256SUMS; do
+  gh attestation verify "$asset" --repo poulsena/delegatd
+done
+```
+
+No license is granted for this repository; all rights are reserved.
