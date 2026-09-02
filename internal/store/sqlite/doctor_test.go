@@ -13,7 +13,7 @@ import (
 
 func TestDoctorCheckOpensRelativeDatabaseReadOnly(t *testing.T) {
 	dir := t.TempDir()
-	databasePath := filepath.Join(dir, "state #%?.db")
+	databasePath := filepath.Join(dir, "state #%25.db")
 	createDatabase(t, databasePath)
 	before, err := os.ReadFile(databasePath)
 	if err != nil {

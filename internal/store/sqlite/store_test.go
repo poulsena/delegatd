@@ -96,7 +96,7 @@ func TestStoreRejectsResourceConflictWithoutPartialTask(t *testing.T) {
 
 func TestOpenReadOnlyLeavesDatabaseUnchanged(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "state #?.db")
+	path := filepath.Join(dir, "state #%25.db")
 	store, err := Open(context.Background(), Config{Path: filepath.Base(path)}, dir)
 	if err != nil {
 		t.Fatal(err)
